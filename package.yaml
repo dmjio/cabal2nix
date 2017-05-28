@@ -1,5 +1,5 @@
 name:           cabal2nix
-version:        "2.3.1"
+version:        "3"
 synopsis:       Convert Cabal files into Nix build instructions.
 author:
   - Peter Simons
@@ -140,6 +140,7 @@ executables:
       - Paths_cabal2nix
     dependencies:
       - cabal2nix
+      - pretty-show   # for debugging
 
   hackage2nix:
     main:               Main.hs
