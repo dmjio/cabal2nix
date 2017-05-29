@@ -59,7 +59,7 @@ license-file:   LICENSE
 github:         nixos/cabal2nix
 category:       Distribution, Nix
 stability:      stable
-tested-with:    GHC > 7.10 && < 8.1
+tested-with:    GHC > 8 && < 8.1
 description: >
   Convert Cabal files into Nix build instructions. Users of Nix can install the
   latest version by running:
@@ -140,8 +140,11 @@ executables:
       - Paths_cabal2nix
     dependencies:
       - cabal2nix
-      - pretty-show   # for debugging
-
+      - pretty-show
+    other-extensions:
+      - DeriveGeneric
+      - DuplicateRecordFields
+      - FlexibleInstances
   hackage2nix:
     main:               Main.hs
     source-dirs:        hackage2nix
@@ -159,6 +162,10 @@ executables:
       - -threaded
       - -rtsopts
       - -with-rtsopts=-N
+    other-extensions:
+      - OverloadedStrings
+      - RecordWildCards
+      - TemplateHaskell
 
 tests:
   doctests:
