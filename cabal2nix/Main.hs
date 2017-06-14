@@ -24,8 +24,20 @@ import System.IO.Unsafe
 import Text.PrettyPrint
 import Text.Show.Pretty
 
+data Component = Lib | Exe String | Test String
+  deriving (Show, Eq, Ord, Generic)
+
+data Config = CabalConf ConfVar | Config Component
+  deriving (Show, Eq, Generic)
+
+type CTree = CondTree ConfVar [Dependency]
+
+data IfThen a = (Condition Config) :=> a
+  deriving (Show, Generic)
+
+infixr 0 :=>
 data BInfo = BInfo
-  { disabled  :: Condition ConfVar
+  { disabled  :: Condition Config
   , haskell   :: [IfThen Dependency]
   , pkgconfig :: [IfThen Dependency]
   , system    :: [IfThen Dependency]
@@ -37,7 +49,7 @@ instance Monoid BInfo where
   mappend (BInfo x1 x2 x3 x4 x5) (BInfo y1 y2 y3 y4 y5) = BInfo (cOr x1 y1) (mappend x2 y2) (mappend x3 y3) (mappend x4 y4) (mappend x5 y5)
   mempty = BInfo (Lit False) mempty mempty mempty mempty
 
-buildinfo2binfo :: Condition ConfVar -> BuildInfo -> BInfo
+buildinfo2binfo :: Condition Config -> BuildInfo -> BInfo
 buildinfo2binfo cond bi = BInfo
   { disabled = if buildable bi then mempty else cond
   , haskell =  map (cond :=>) (targetBuildDepends bi)
@@ -46,35 +58,41 @@ buildinfo2binfo cond bi = BInfo
   , tools = map (cond :=>) (buildTools bi)
   }
 
-library2binfo :: Condition ConfVar -> CTree Library -> BInfo
+library2binfo :: Condition Config -> CTree Library -> BInfo
 library2binfo ctx (CondNode lib _ comps) = mconcat $
   [ buildinfo2binfo ctx (libBuildInfo lib) ] ++ map (libraryComponents2binfo ctx) comps
+  where
+    libraryComponents2binfo :: Condition Config -> (Condition ConfVar, CTree Library, Maybe (CTree Library)) -> BInfo
+    libraryComponents2binfo ctx (cond,true,false) =
+      library2binfo (cAnd ctx (cabalConf cond)) true `mappend` maybe mempty (library2binfo (cAnd ctx (cNot (cabalConf cond)))) false
 
-libraryComponents2binfo :: Condition ConfVar -> (Condition ConfVar, CTree Library, Maybe (CTree Library)) -> BInfo
-libraryComponents2binfo ctx (cond,true,false) =
-  library2binfo (cAnd ctx cond) true `mappend` maybe mempty (library2binfo (cAnd ctx (cNot cond))) false
-
-executable2binfo :: Condition ConfVar -> CTree Executable -> BInfo
+executable2binfo :: Condition Config -> CTree Executable -> BInfo
 executable2binfo ctx (CondNode exe _ comps) = mconcat $
   [ buildinfo2binfo ctx (buildInfo exe) ] ++ map (executableComponents2binfo ctx) comps
+  where
+    executableComponents2binfo :: Condition Config -> (Condition ConfVar, CTree Executable, Maybe (CTree Executable)) -> BInfo
+    executableComponents2binfo ctx (cond,true,false) =
+      executable2binfo (cAnd ctx (cabalConf cond)) true `mappend` maybe mempty (executable2binfo (cAnd ctx (cNot (cabalConf cond)))) false
 
-executableComponents2binfo :: Condition ConfVar -> (Condition ConfVar, CTree Executable, Maybe (CTree Executable)) -> BInfo
-executableComponents2binfo ctx (cond,true,false) =
-  executable2binfo (cAnd ctx cond) true `mappend` maybe mempty (executable2binfo (cAnd ctx (cNot cond))) false
-
-data Component = Lib | Exe String
-  deriving (Show, Generic)
+test2binfo :: Condition Config -> CTree TestSuite -> BInfo
+test2binfo ctx (CondNode test _ comps) = mconcat $
+  [ buildinfo2binfo ctx (testBuildInfo test) ] ++ map (testComponents2binfo ctx) comps
+  where
+    testComponents2binfo :: Condition Config -> (Condition ConfVar, CTree TestSuite, Maybe (CTree TestSuite)) -> BInfo
+    testComponents2binfo ctx (cond,true,false) =
+      test2binfo (cAnd ctx (cabalConf cond)) true `mappend` maybe mempty (test2binfo (cAnd ctx (cNot (cabalConf cond)))) false
 
 gdp2binfo :: GenericPackageDescription -> [(Component,BInfo)]
 gdp2binfo gpd = maybe [] (return . (,) Lib . (library2binfo (Lit True))) (condLibrary gpd)
              ++ map (\(name,ctree) -> (Exe name, (executable2binfo (Lit True) ctree))) (condExecutables gpd)
+             ++ map (\(name,ctree) -> (Test name, (test2binfo (Lit True) ctree))) (condTestSuites gpd)
 
-type CTree = CondTree ConfVar [Dependency]
-
-data IfThen a = (Condition ConfVar) :=> a
-  deriving (Show, Generic)
-
-infixr 0 :=>
+cabalConf :: Condition ConfVar -> Condition Config
+cabalConf (Var c)      = Var (CabalConf c)
+cabalConf (Lit b)      = Lit b
+cabalConf (CNot c)     = cNot (cabalConf c)
+cabalConf (CAnd c1 c2) = cAnd (cabalConf c1) (cabalConf c2)
+cabalConf (COr c1 c2)  = cOr (cabalConf c1) (cabalConf c2)
 
 -------------------------------------------------------------------------------
 
@@ -92,11 +110,22 @@ main = do [fpath] <- getArgs
 instance PrettyVal Component where
 instance PrettyVal BInfo where
 instance PrettyVal Dependency where prettyVal = String . display
-instance PrettyVal (Condition ConfVar) where prettyVal = String . show . ppCondition
+instance PrettyVal Config where
+instance PrettyVal OS where
+instance PrettyVal Arch where
+instance PrettyVal FlagName where
+instance PrettyVal CompilerFlavor where
+instance PrettyVal VersionRange where
+instance PrettyVal Version where
 
 instance PrettyVal a => PrettyVal (IfThen a) where
   prettyVal (Lit True :=> body) = prettyVal body
   prettyVal (cond :=> body) = InfixCons (prettyVal cond) [(":=>", prettyVal body)]
+
+instance PrettyVal (Condition ConfVar) where
+  prettyVal = String . show . ppCondition
+
+instance PrettyVal (Condition Config) where
 
 ppCondition :: Condition ConfVar -> Doc
 ppCondition (Var x)        = ppConfVar x
@@ -104,6 +133,9 @@ ppCondition (Lit b)        = text (show b)
 ppCondition (CNot c)       = char '!' <> (ppCondition c)
 ppCondition (COr c1 c2)    = parens (hsep [ppCondition c1, text "||" <+> ppCondition c2])
 ppCondition (CAnd c1 c2)   = parens (hsep [ppCondition c1, text "&&" <+> ppCondition c2])
+
+instance PrettyVal ConfVar where
+  prettyVal = String . show . ppConfVar
 
 ppConfVar :: ConfVar -> Doc
 ppConfVar (OS os)          = text "os"   <> parens (disp os)
